@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.manga.comicconv"
+    android:versionCode="11"
+    android:versionName="2.0">
+
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="34"/>
+
+    <!-- 读漫画目录。Android 11+ 需要「所有文件访问」才能读非媒体文件（zip/rar/pdf） -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29"/>
+
+    <!-- 长任务进度提示 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+
+    <application
+        android:label="漫画转换器"
+        android:icon="@mipmap/ic_launcher"
+        android:largeHeap="true"
+        android:requestLegacyExternalStorage="true"
+        android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar"
+        android:allowBackup="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="漫画转换器"
+            android:exported="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".ConvertService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"/>
+    </application>
+</manifest>

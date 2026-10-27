@@ -1,0 +1,28 @@
+# 构建产物
+build/
+dist/
+*.apk
+*.idsig
+*.aab
+
+# 签名相关，绝对不要提交
+*.jks
+*.keystore
+*.p12
+*.pass
+release.jks
+release.jks.pass
+
+# 编译中间产物
+*.class
+*.dex
+
+# 依赖 jar（体积大且各有各的许可证，请自行下载，版本见 README）
+libs/
+
+# 编辑器 / 系统
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db

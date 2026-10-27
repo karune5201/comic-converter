@@ -133,7 +133,7 @@ public class MainActivity extends Activity {
         applySystemBars();
         loadPrefs();          // 先把状态读进来，buildUi 才能拿到正确的开关初值
         buildUi();
-        selectFormat(outFormat);
+        applyState();         // 把默认目录/上次设置写回输入框，不然一进来是空的
         IntentFilter f = new IntentFilter(ConvertService.BC_PROGRESS);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             registerReceiver(receiver, f,
@@ -142,6 +142,7 @@ public class MainActivity extends Activity {
             registerReceiver(receiver, f);   // 三参重载 API 26 才有
         }
         refreshPermState();
+        ensureDirs();          // 默认的漫画/输出目录，缺了就建
         setBusy(ConvertService.running);
     }
 
@@ -523,7 +524,7 @@ public class MainActivity extends Activity {
             String p = stIn;
             File d = (p != null && !p.isEmpty()) ? new File(p) : null;
             if (d == null || !d.isDirectory()) {
-                d = new File(Environment.getExternalStorageDirectory(), "漫画");
+                d = new File(defaultIn());
             }
             if (!d.isDirectory()) d = Environment.getExternalStorageDirectory();
             String[] list = d.list();
@@ -569,6 +570,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         updatePermCard();
+        if (hasAllFiles()) ensureDirs();   // 刚给了权限，补建目录
     }
 
     /** 从系统设置切回来时窗口重新获得焦点，立刻重查一次 */
@@ -581,17 +583,24 @@ public class MainActivity extends Activity {
     // ================= 扫描 =================
 
     private void doScan() {
-        final String path = inPath.getText().toString().trim();
-        if (TextUtils.isEmpty(path)) {
-            toast("先填输入目录");
-            return;
+        String p0 = inPath.getText().toString().trim();
+        if (TextUtils.isEmpty(p0)) {
+            p0 = defaultIn();          // 空着就按默认漫画目录来，别拦人
+            inPath.setText(p0);
+            stIn = p0;
         }
+        final String path = p0;
         final File dir = new File(path);
         if (!dir.isDirectory()) {
-            toast("这个目录不存在，或者读不到");
-            appendLog("✗ 读不到这个目录：" + path
-                    + (hasAllFiles() ? "" : "（缺「所有文件访问」权限）"));
-            return;
+            // 目录没有就建出来，建不出来才是真读不到
+            if (!ensureDir(dir)) {
+                toast("这个目录不存在，也建不出来");
+                appendLog("✗ 读不到这个目录：" + path
+                        + (hasAllFiles() ? "" : "（缺「所有文件访问」权限）"));
+                return;
+            }
+            if (dirNoted.add("ok:" + path)) appendLog("建了目录：" + path);
+            toast("建好了目录：" + path);
         }
         if (scanBtn != null) scanBtn.setEnabled(false);
         countText.setText("扫描中…");
@@ -868,15 +877,65 @@ public class MainActivity extends Activity {
         if (rootView != null) md3.snackbar(rootView, s);
     }
 
+    /** 漫画目录默认 /storage/emulated/0/漫画 */
+    static String defaultIn() {
+        return new File(Environment.getExternalStorageDirectory(), "漫画").getAbsolutePath();
+    }
+
+    /** 输出目录默认 /storage/emulated/0/Comicconv */
+    static String defaultOut() {
+        return new File(Environment.getExternalStorageDirectory(), "Comicconv").getAbsolutePath();
+    }
+
+    /** 老版本的默认输出目录 */
+    static String oldDefaultOut() {
+        return new File(Environment.getExternalStorageDirectory(), "Download/ComicConv").getAbsolutePath();
+    }
+
+    /** 目录不存在就建出来；建不出来（没权限之类）返回 false */
+    static boolean ensureDir(File d) {
+        if (d == null) return false;
+        if (d.isDirectory()) return true;
+        try {
+            if (d.mkdirs() && d.isDirectory()) return true;
+        } catch (Throwable ignore) {}
+        return d.isDirectory();
+    }
+
+    /** 已经报过建不了/建好了的路径，避免 onResume 反复刷同一条 */
+    private final java.util.Set<String> dirNoted = new java.util.HashSet<>();
+
+    /** 把界面上这两个目录补出来，缺一个建一个 */
+    private void ensureDirs() {
+        ensureOneDir(stIn);
+        ensureOneDir(stOut);
+    }
+
+    /** 已经有了就什么都不做，只有真建了或者真建不了才写日志，且各写一次 */
+    private void ensureOneDir(String path) {
+        if (TextUtils.isEmpty(path)) return;
+        File d = new File(path);
+        if (d.isDirectory()) return;                     // 本来就有，别刷屏
+        if (ensureDir(d)) {
+            if (dirNoted.add("ok:" + path)) appendLog("建了目录：" + path);
+        } else {
+            if (dirNoted.add("fail:" + path)) {
+                appendLog("✗ 建不了目录：" + path
+                        + (hasAllFiles() ? "" : "（缺「所有文件访问」权限）"));
+            }
+        }
+    }
+
     /** 只读偏好到状态字段，界面由 buildUi 按这些值初始化 */
     private void loadPrefs() {
         SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
-        File ext = Environment.getExternalStorageDirectory();
-        String defIn = new File(ext, "漫画").isDirectory()
-                ? new File(ext, "漫画").getAbsolutePath()
-                : ext.getAbsolutePath();
-        stIn = p.getString("in", defIn);
-        stOut = p.getString("out", new File(ext, "Download/ComicConv").getAbsolutePath());
+        stIn = p.getString("in", defaultIn());
+        String out = p.getString("out", null);
+        // 旧版的默认输出目录是 Download/ComicConv，升级后统一换成新的默认值
+        if (out == null || out.trim().isEmpty() || out.equals(oldDefaultOut())) {
+            out = defaultOut();
+        }
+        stOut = out;
         stAuthor = p.getString("author", "");
         outFormat = p.getInt("fmt", 0);
         if (outFormat < 0 || outFormat >= FMT_NAMES.length) outFormat = 0;

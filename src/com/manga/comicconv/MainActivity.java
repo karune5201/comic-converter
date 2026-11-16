@@ -51,6 +51,8 @@ public class MainActivity extends Activity {
 
     private static final String PREFS = "comicconv";
     private static final int REQ_PERM = 100;
+    /** 探测外部存储根目录可写性用的临时目录名（用完就删） */
+    private static final String PROBE_DIR = ".comicconv_perm_probe";
     /** 列表最多直接铺多少行，超出的走弹窗挑选 */
     private static final int MAX_INLINE_ROWS = 400;
     /** 内联日志保留的尾部行数 */
@@ -269,7 +271,8 @@ public class MainActivity extends Activity {
         permCard.setBackground(md3.stroked(md3.tertiaryContainer, md3.tertiary,
                 md3.dp(1), md3.shapeMedium()));
         TextView hint = md3.bodySmall("得开「所有文件访问」权限，不然读不到漫画文件夹\n"
-                + "Android 11 以后对压缩包这类文件管得比较严", md3.onTertiaryContainer);
+                + "Android 11 以后对压缩包这类文件管得比较严\n"
+                + "路径：设置 → 应用 → 漫画转换器 → 权限 → 所有文件访问", md3.onTertiaryContainer);
         permCard.addView(hint);
         Button b = md3.filledButton("去开权限");
         b.setOnClickListener(v -> requestAllFiles());
@@ -282,6 +285,7 @@ public class MainActivity extends Activity {
         c.addView(md3.cardHeader("选文件"));
 
         inPath = new EditText(this);
+        watchPath(inPath);
         c.addView(md3.textField("漫画目录", inPath));
 
         LinearLayout r = new LinearLayout(this);
@@ -296,8 +300,35 @@ public class MainActivity extends Activity {
         c.addView(md3.divider());
 
         outPath = new EditText(this);
+        watchPath(outPath);
         c.addView(md3.textField("输出目录", outPath));
         return c;
+    }
+
+    /**
+     * 目录输入框改完就落盘。
+     * 以前只在点「开始转换」时 savePrefs()，所以只改目录、不转换，
+     * 杀掉进程再打开就退回默认值了。
+     */
+    private void watchPath(EditText e) {
+        e.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void afterTextChanged(android.text.Editable s) {
+                savePrefsQuiet();
+            }
+        });
+    }
+
+    /** 只存路径这类字段，控件还没建好或正在销毁时不炸 */
+    private void savePrefsQuiet() {
+        try {
+            if (inPath == null || outPath == null) return;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString("in", inPath.getText().toString().trim())
+                    .putString("out", outPath.getText().toString().trim())
+                    .apply();
+        } catch (Throwable ignore) {}
     }
 
     private View buildFormatCard() {
@@ -494,9 +525,10 @@ public class MainActivity extends Activity {
     private boolean hasAllFiles() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (Environment.isExternalStorageManager()) return true;
-            // 有些 ROM 上「所有文件访问」的开关不会反映到标准 API，
-            // 只要能真正列出漫画目录，就当已授权，别再挡着用户。
-            return canProbeStorage();
+            // 只有「真能写进去」才算拿到权限。
+            // 光看 list() 不行：Android 11+ 没权限时 list() 常常返回空数组而不是 null，
+            // 那样会误判成已授权，权限卡片被藏起来，用户永远没机会去开。
+            return canWriteRoot();
         }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return true;   // 6.0 以下安装时就授权了
@@ -518,19 +550,24 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 真的去列一下目录，能读到就当权限可用 */
-    private boolean canProbeStorage() {
+    /**
+     * 真往外部存储根目录写一个探针目录再删掉。
+     * 只有新建成功才算拿到「所有文件访问」——这是权限给不给的唯一硬指标。
+     */
+    private boolean canWriteRoot() {
+        File probe = new File(Environment.getExternalStorageDirectory(), PROBE_DIR);
         try {
-            String p = stIn;
-            File d = (p != null && !p.isEmpty()) ? new File(p) : null;
-            if (d == null || !d.isDirectory()) {
-                d = new File(defaultIn());
+            if (probe.isDirectory()) probe.delete();
+            if (probe.mkdir()) {
+                probe.delete();
+                return true;
             }
-            if (!d.isDirectory()) d = Environment.getExternalStorageDirectory();
-            String[] list = d.list();
-            return list != null;
+            // 建不出来时，若同名的东西本来就在（极少数情况），也算能写
+            return probe.isDirectory();
         } catch (Throwable t) {
             return false;
+        } finally {
+            try { if (probe.exists()) probe.delete(); } catch (Throwable ignore) {}
         }
     }
 
@@ -545,17 +582,26 @@ public class MainActivity extends Activity {
 
     private void requestAllFiles() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
-                i.setData(Uri.parse("package:" + getPackageName()));
-                startActivity(i);
-            } catch (Exception e) {
-                try {
-                    startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
-                } catch (Exception e2) {
-                    toast("打不开权限页面，去系统设置里手动开一下");
-                }
+            // 依次尝试：本应用的「所有文件访问」页 → 特殊权限里的总列表 →
+            // 本应用详情页。有些 ROM（联想等）在应用详情里不显示这一项，
+            // 前两个 intent 一般还是能直接落到开关所在的页面。
+            if (openSettingsPage(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                    .setData(Uri.parse("package:" + getPackageName())))) {
+                pendingPermCheck = true;
+                return;
             }
+            if (openSettingsPage(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))) {
+                pendingPermCheck = true;
+                toast("在列表里找到「漫画转换器」，把开关打开");
+                return;
+            }
+            if (openSettingsPage(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.parse("package:" + getPackageName())))) {
+                pendingPermCheck = true;
+                toast("在「权限」里找到「所有文件访问」并打开");
+                return;
+            }
+            toast("打不开权限页面，去系统设置 → 应用 → 漫画转换器 → 所有文件访问 手动开一下");
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             // requestPermissions 是 API 23 才有的
             requestPermissions(new String[]{
@@ -566,11 +612,31 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 能打开返回 true，打不开（没有对应 Activity）返回 false */
+    private boolean openSettingsPage(Intent i) {
+        try {
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
         updatePermCard();
-        if (hasAllFiles()) ensureDirs();   // 刚给了权限，补建目录
+        if (hasAllFiles()) {
+            if (pendingPermCheck) {          // 刚从权限页回来，且这次真拿到权限了
+                pendingPermCheck = false;
+                toast("权限拿到了");
+            }
+            ensureDirs();                    // 刚给了权限，补建目录
+        } else if (pendingPermCheck) {
+            pendingPermCheck = false;        // 回来了还是没权限，提示去哪开
+            toast("还没拿到「所有文件访问」，这台机器在：设置 → 应用 → 漫画转换器 → 权限");
+        }
     }
 
     /** 从系统设置切回来时窗口重新获得焦点，立刻重查一次 */
@@ -605,8 +671,10 @@ public class MainActivity extends Activity {
         if (scanBtn != null) scanBtn.setEnabled(false);
         countText.setText("扫描中…");
         final boolean rec = stRec;
+        final File outDir = new File(outPath.getText().toString().trim());
         new Thread(() -> {
-            final List<Scanner.Item> found = Scanner.scan(dir, rec);
+            // 输出目录整个跳过，免得把上次转出来的东西又当书扫一遍
+            final List<Scanner.Item> found = Scanner.scan(dir, rec, outDir);
             runOnUiThread(() -> {
                 items.clear();
                 items.addAll(found);
@@ -882,13 +950,18 @@ public class MainActivity extends Activity {
         return new File(Environment.getExternalStorageDirectory(), "漫画").getAbsolutePath();
     }
 
-    /** 输出目录默认 /storage/emulated/0/Comicconv */
+    /** 输出目录默认 /storage/emulated/0/漫画/Comicconv（放在漫画目录里面） */
     static String defaultOut() {
+        return new File(defaultIn(), "Comicconv").getAbsolutePath();
+    }
+
+    /** 老版本的默认输出目录：根目录下的 Comicconv */
+    static String oldDefaultOut() {
         return new File(Environment.getExternalStorageDirectory(), "Comicconv").getAbsolutePath();
     }
 
-    /** 老版本的默认输出目录 */
-    static String oldDefaultOut() {
+    /** 更老的默认输出目录：Download/ComicConv */
+    static String olderDefaultOut() {
         return new File(Environment.getExternalStorageDirectory(), "Download/ComicConv").getAbsolutePath();
     }
 
@@ -904,6 +977,8 @@ public class MainActivity extends Activity {
 
     /** 已经报过建不了/建好了的路径，避免 onResume 反复刷同一条 */
     private final java.util.Set<String> dirNoted = new java.util.HashSet<>();
+    /** 刚跳去过权限页，回来要判断到底给没给 */
+    private boolean pendingPermCheck;
 
     /** 把界面上这两个目录补出来，缺一个建一个 */
     private void ensureDirs() {
@@ -931,8 +1006,9 @@ public class MainActivity extends Activity {
         SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
         stIn = p.getString("in", defaultIn());
         String out = p.getString("out", null);
-        // 旧版的默认输出目录是 Download/ComicConv，升级后统一换成新的默认值
-        if (out == null || out.trim().isEmpty() || out.equals(oldDefaultOut())) {
+        // 旧版的默认输出目录（Download/ComicConv、根目录 Comicconv）升级后统一换成新默认值
+        if (out == null || out.trim().isEmpty()
+                || out.equals(oldDefaultOut()) || out.equals(olderDefaultOut())) {
             out = defaultOut();
         }
         stOut = out;

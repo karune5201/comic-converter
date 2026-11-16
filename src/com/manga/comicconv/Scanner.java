@@ -57,8 +57,19 @@ public final class Scanner {
      * recursive 为 true 时递归子目录；子目录里直接放图片的会被当成一本书。
      */
     public static List<Item> scan(File dir, boolean recursive) {
+        return scan(dir, recursive, null);
+    }
+
+    /**
+     * 扫目录，exclude 里的目录整个跳过（一般是输出目录）。
+     * 输出目录放在漫画目录里面时，不跳过就会把上一轮转出来的 PDF/CBZ 当成新书再扫一遍。
+     */
+    public static List<Item> scan(File dir, boolean recursive, File exclude) {
+        // 输出目录就是扫描根目录时不能跳过：那样会把整棵目录树都排除掉，
+        // 结果一本都扫不到。只有输出目录在扫描目录「里面」时才需要排除。
+        if (exclude != null && samePath(dir, exclude)) exclude = null;
         List<Item> out = new ArrayList<>();
-        scanInto(dir, recursive, out, 0);
+        scanInto(dir, recursive, out, 0, exclude);
         Collections.sort(out, new java.util.Comparator<Item>() {
             @Override public int compare(Item a, Item b) {
                 return ComicSource.Comparator.natural(a.file.getPath(), b.file.getPath());
@@ -67,8 +78,9 @@ public final class Scanner {
         return out;
     }
 
-    private static void scanInto(File dir, boolean recursive, List<Item> out, int depth) {
+    private static void scanInto(File dir, boolean recursive, List<Item> out, int depth, File exclude) {
         if (dir == null || !dir.isDirectory() || depth > 12 || out.size() > 5000) return;
+        if (exclude != null && samePath(dir, exclude)) return;
         File[] fs = dir.listFiles();
         if (fs == null) return;
 
@@ -98,8 +110,17 @@ public final class Scanner {
                     out.add(it);
                 }
             } else if (f.isDirectory() && recursive) {
-                scanInto(f, true, out, depth + 1);
+                scanInto(f, true, out, depth + 1, exclude);
             }
+        }
+    }
+
+    /** 路径是不是同一个目录（比较规范化后的绝对路径） */
+    private static boolean samePath(File a, File b) {
+        try {
+            return a.getCanonicalPath().equals(b.getCanonicalPath());
+        } catch (Throwable t) {
+            return a.getAbsolutePath().equals(b.getAbsolutePath());
         }
     }
 

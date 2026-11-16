@@ -955,16 +955,6 @@ public class MainActivity extends Activity {
         return new File(defaultIn(), "Comicconv").getAbsolutePath();
     }
 
-    /** 老版本的默认输出目录：根目录下的 Comicconv */
-    static String oldDefaultOut() {
-        return new File(Environment.getExternalStorageDirectory(), "Comicconv").getAbsolutePath();
-    }
-
-    /** 更老的默认输出目录：Download/ComicConv */
-    static String olderDefaultOut() {
-        return new File(Environment.getExternalStorageDirectory(), "Download/ComicConv").getAbsolutePath();
-    }
-
     /** 目录不存在就建出来；建不出来（没权限之类）返回 false */
     static boolean ensureDir(File d) {
         if (d == null) return false;
@@ -1005,13 +995,12 @@ public class MainActivity extends Activity {
     private void loadPrefs() {
         SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
         stIn = p.getString("in", defaultIn());
-        String out = p.getString("out", null);
-        // 旧版的默认输出目录（Download/ComicConv、根目录 Comicconv）升级后统一换成新默认值
-        if (out == null || out.trim().isEmpty()
-                || out.equals(oldDefaultOut()) || out.equals(olderDefaultOut())) {
-            out = defaultOut();
-        }
-        stOut = out;
+        // 存过什么就用什么，只有从没设置过（或存成空）才落到默认目录。
+        // 以前这里按「值等于旧默认」去迁移，结果用户手动把输出目录设成
+        // /storage/emulated/0/Comicconv（v2.2 的默认值）时，每次启动都会被
+        // 改成新默认值——用户自己的选择被覆盖了。默认值只对没设置过的人生效。
+        stOut = p.getString("out", defaultOut());
+        if (stOut == null || stOut.trim().isEmpty()) stOut = defaultOut();
         stAuthor = p.getString("author", "");
         outFormat = p.getInt("fmt", 0);
         if (outFormat < 0 || outFormat >= FMT_NAMES.length) outFormat = 0;

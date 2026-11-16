@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Typeface;
@@ -51,6 +52,10 @@ public class MainActivity extends Activity {
 
     private static final String PREFS = "comicconv";
     private static final int REQ_PERM = 100;
+    /** 安装会话的 requestCode（结果广播用它区分） */
+    private static final int REQ_INSTALL = 200;
+    /** 启动时静默查更新的最小间隔 */
+    private static final long AUTO_CHECK_GAP_MS = 12 * 60 * 60 * 1000L;
     /** 探测外部存储根目录可写性用的临时目录名（用完就删） */
     private static final String PROBE_DIR = ".comicconv_perm_probe";
     /** 列表最多直接铺多少行，超出的走弹窗挑选 */
@@ -62,7 +67,9 @@ public class MainActivity extends Activity {
     private FrameLayout rootView;
 
     private EditText inPath, outPath, authorBox;
-    private TextView statusText, logText, countText, formatHint;
+    private TextView statusText, logText, countText, formatHint, versionText, updateHint;
+    private Button updateBtn;
+    private boolean updating;
     private Md3.LinearProgress pageBar;
     private Button scanBtn, convertBtn, cancelBtn, pickBtn;
     private LinearLayout listBox, permCard, kindleRow, rtlRow;
@@ -146,6 +153,64 @@ public class MainActivity extends Activity {
         refreshPermState();
         ensureDirs();          // 默认的漫画/输出目录，缺了就建
         setBusy(ConvertService.running);
+        registerInstallReceiver();
+        autoCheckUpdate();
+    }
+
+    /** 系统安装结果广播（PackageInstaller 回传） */
+    private BroadcastReceiver installReceiver;
+
+    private void registerInstallReceiver() {
+        installReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent i) {
+                int status = i.getIntExtra(PackageInstaller.EXTRA_STATUS,
+                        PackageInstaller.STATUS_FAILURE);
+                String msg = i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+                if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+                    // 系统要用户点确认，把它的确认界面拉起来
+                    Intent confirm = i.getParcelableExtra(Intent.EXTRA_INTENT);
+                    if (confirm != null) {
+                        try {
+                            confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                            startActivity(confirm);
+                        } catch (Throwable t) {
+                            toast("打不开安装确认界面");
+                        }
+                    }
+                } else if (status == PackageInstaller.STATUS_SUCCESS) {
+                    appendLog("安装完成");
+                    setUpdateHint("安装完成，重启应用生效");
+                } else {
+                    String m = msg != null ? msg : ("状态 " + status);
+                    appendLog("✗ 安装未完成：" + m);
+                    setUpdateHint("安装未完成：" + m);
+                    toast("安装未完成：" + m);
+                }
+            }
+        };
+        IntentFilter f = new IntentFilter(Installer.ACTION_RESULT);
+        if (Build.VERSION.SDK_INT >= 33) {
+            // 结果来自系统（PackageInstaller），系统广播不受导出限制
+            registerReceiver(installReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(installReceiver, f);
+        }
+    }
+
+    /**
+     * 启动时静默查一次更新：真正的网络请求放在后台线程，
+     * 只有发现新版本才弹提示，没网/失败都不打扰用户。
+     */
+    private void autoCheckUpdate() {
+        try {
+            SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+            long last = p.getLong("lastUpdateCheck", 0L);
+            if (System.currentTimeMillis() - last < AUTO_CHECK_GAP_MS) return;
+            p.edit().putLong("lastUpdateCheck", System.currentTimeMillis()).apply();
+        } catch (Throwable ignore) {
+            return;
+        }
+        checkForUpdate(false);
     }
 
     private void applySystemBars() {
@@ -208,6 +273,7 @@ public class MainActivity extends Activity {
         content.addView(buildFormatCard());
         content.addView(buildListCard());
         content.addView(buildLogCard());
+        content.addView(buildAboutCard());
         pageScroll.addView(content);
         return pageScroll;
     }
@@ -233,6 +299,7 @@ public class MainActivity extends Activity {
         lc.addView(buildPermCard());
         lc.addView(buildSourceCard());
         lc.addView(buildFormatCard());
+        lc.addView(buildAboutCard());
         ls.addView(lc);
         left.addView(ls, lpWeightV(1f));
 
@@ -430,9 +497,170 @@ public class MainActivity extends Activity {
         return c;
     }
 
+    /** 关于卡片：版本号 + 检查更新。更新只走 GitHub Release，不依赖应用商店 */
+    private View buildAboutCard() {
+        LinearLayout c = md3.card();
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(md3.cardHeader("关于"), lpWeightH(1f));
+        updateBtn = md3.textButton("检查更新");
+        updateBtn.setOnClickListener(v -> checkForUpdate(true));
+        head.addView(updateBtn);
+        c.addView(head);
+
+        versionText = md3.bodySmall("当前版本 " + appVersionText(), md3.onSurfaceVariant);
+        c.addView(versionText);
+
+        updateHint = md3.bodySmall("", md3.onSurfaceVariant);
+        updateHint.setVisibility(View.GONE);
+        c.addView(updateHint);
+        return c;
+    }
+
+    /** 读版本号，读不到就给个占位，别因为拿不到版本让整页崩掉 */
+    private String appVersionText() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    /** 当前版本号（比较用） */
+    private String appVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Throwable t) {
+            return "0";
+        }
+    }
+
+    /**
+     * 查更新。manual=true 是用户点按钮，一定会给反馈；
+     * manual=false 是启动时静默查，只有真有新版本才提示。
+     */
+    private void checkForUpdate(boolean manual) {
+        if (updating) {
+            if (manual) toast("正在更新，稍等");
+            return;
+        }
+        if (manual) {
+            setUpdateHint("正在检查…");
+            updateBtn.setEnabled(false);
+        }
+        new Thread(() -> {
+            Updater.Release r = null;
+            String err = null;
+            try {
+                r = Updater.checkLatest();
+            } catch (Throwable t) {
+                err = t.getMessage() != null ? t.getMessage() : t.toString();
+            }
+            final Updater.Release rel = r;
+            final String error = err;
+            runOnUiThread(() -> {
+                updateBtn.setEnabled(true);
+                if (error != null) {
+                    if (manual) {
+                        setUpdateHint("检查失败：" + error);
+                        appendLog("✗ 检查更新失败：" + error);
+                    }
+                    return;
+                }
+                final String cur = appVersion();
+                if (!Updater.isNewer(rel.version, cur)) {
+                    setUpdateHint("已是最新版本（" + rel.tag + "）");
+                    if (manual) toast("已是最新版本");
+                    return;
+                }
+                setUpdateHint("有新版本 " + rel.tag + "（当前 " + cur + "）");
+                showUpdateDialog(rel, cur);
+            });
+        }).start();
+    }
+
+    private void setUpdateHint(String s) {
+        if (updateHint == null) return;
+        if (s == null || s.isEmpty()) {
+            updateHint.setVisibility(View.GONE);
+        } else {
+            updateHint.setVisibility(View.VISIBLE);
+            updateHint.setText(s);
+        }
+    }
+
+    private void showUpdateDialog(final Updater.Release rel, String cur) {
+        String body = "新版本 " + rel.tag + "，当前 " + cur + "。";
+        if (rel.apkSize > 0) {
+            body += "\n安装包 " + (rel.apkSize / 1024 / 1024) + " MB。";
+        }
+        body += "\n\n下载完会交给系统安装，你还要在系统弹窗里点一次确认。";
+        String notes = rel.notes;
+        if (notes != null && notes.trim().length() > 0) {
+            String n = notes.trim();
+            if (n.length() > 600) n = n.substring(0, 600) + "…";
+            body += "\n\n" + n;
+        }
+        md3.dialog("发现新版本", md3.bodyMedium(body, md3.onSurfaceVariant),
+                "立即更新", () -> startUpdate(rel),
+                "以后再说", null).show();
+    }
+
+    /** 下载 + 交给系统安装 */
+    private void startUpdate(final Updater.Release rel) {
+        if (updating) return;
+        updating = true;
+        updateBtn.setEnabled(false);
+        final File dest = new File(getCacheDir(), "update.apk");
+        appendLog("开始下载 " + rel.apkName);
+        new Thread(() -> {
+            String err = null;
+            try {
+                Updater.download(rel, dest, pct -> runOnUiThread(() -> {
+                    setUpdateHint("下载中 " + pct + "%");
+                    if (pageBar != null) pageBar.setFraction(pct / 100f);
+                }));
+            } catch (Throwable t) {
+                err = t.getMessage() != null ? t.getMessage() : t.toString();
+            }
+            final String error = err;
+            runOnUiThread(() -> {
+                updating = false;
+                updateBtn.setEnabled(true);
+                if (pageBar != null) pageBar.setFraction(0f);
+                if (error != null) {
+                    setUpdateHint("下载失败：" + error);
+                    appendLog("✗ 下载失败：" + error);
+                    toast("下载失败：" + error);
+                    return;
+                }
+                setUpdateHint("下载完成，等待安装");
+                appendLog("下载完成，交给系统安装");
+                installDownloaded(dest);
+            });
+        }).start();
+    }
+
+    /** 交给 PackageInstaller；没给「安装未知应用」权限就先带用户去开 */
+    private void installDownloaded(File apk) {
+        if (!Installer.canInstall(this)) {
+            toast("需要允许「安装未知应用」，开完再点一次检查更新");
+            Installer.openUnknownSourcesSetting(this);
+            return;
+        }
+        try {
+            Installer.install(this, apk, REQ_INSTALL);
+        } catch (Throwable t) {
+            String m = t.getMessage() != null ? t.getMessage() : t.toString();
+            setUpdateHint("安装失败：" + m);
+            appendLog("✗ 安装失败：" + m);
+            toast("安装失败：" + m);
+        }
+    }
+
     /** 操作区：状态 + 进度 + 按钮。手机在屏幕底部，平板在左栏底部。 */
-    private View buildActionArea(boolean inPane) {
-        LinearLayout f = new LinearLayout(this);
+    private View buildActionArea(boolean inPane) {        LinearLayout f = new LinearLayout(this);
         f.setOrientation(LinearLayout.VERTICAL);
         f.setBackgroundColor(inPane ? md3.surfaceContainerHigh : md3.surfaceContainerLow);
         int px = md3.dp(16);
@@ -1026,6 +1254,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         try { unregisterReceiver(receiver); } catch (Exception ignore) {}
+        try { if (installReceiver != null) unregisterReceiver(installReceiver); } catch (Exception ignore) {}
         super.onDestroy();
     }
 }
